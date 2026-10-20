@@ -31,8 +31,12 @@ VERDICT_STYLES: dict[str, str] = {
     ats.VERDICT_REVIEW: "background-color: #FFEB9C; color: #9C5700; font-weight: 600",
     ats.VERDICT_FAIL: "background-color: #FFC7CE; color: #9C0006; font-weight: 600",
 }
+VERDICT_BADGE_COLORS: dict[str, str] = {
+    ats.VERDICT_PASS: "green",
+    ats.VERDICT_REVIEW: "orange",
+    ats.VERDICT_FAIL: "red",
+}
 EXCEL_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-MIN_JD_WORDS = 30
 
 # Streamlit Community Cloud monta el repo en /mount/src. Ahí "Carpeta local" sería el disco
 # del servidor, no el del usuario: se oculta (también se puede apagar con la variable de entorno).
@@ -114,7 +118,7 @@ def render_metrics(ranking: pd.DataFrame, failures: pd.DataFrame) -> None:
     col4.metric("Archivos no procesados", len(failures))
 
 
-def render_ranking(ranking: pd.DataFrame) -> None:
+def render_ranking(ranking: pd.DataFrame, weight_pct: int) -> None:
     st.dataframe(
         ranking[ats.DISPLAY_COLUMNS].style.map(style_verdict, subset=["Veredicto"]),
         hide_index=True,
@@ -123,33 +127,117 @@ def render_ranking(ranking: pd.DataFrame) -> None:
             "Archivo": st.column_config.TextColumn("Archivo", width="medium"),
             "Email": st.column_config.TextColumn("Email", width="medium"),
             "Score %": st.column_config.ProgressColumn(
-                "Score %", min_value=0, max_value=100, format="%.1f%%", width="small"
+                "Score %",
+                min_value=0,
+                max_value=100,
+                format="%.1f%%",
+                width="small",
+                help=f"{weight_pct}% ajuste al puesto + {100 - weight_pct}% skills requeridas. "
+                "El desglose está en la ficha del candidato.",
             ),
-            "Skills Encontradas": st.column_config.TextColumn("Skills Encontradas", width="large"),
-            "Skills Faltantes": st.column_config.TextColumn("Skills Faltantes", width="medium"),
-            "Años Exp": st.column_config.NumberColumn("Años Exp", format="%.1f", width="small"),
-            "Veredicto": st.column_config.TextColumn("Veredicto", width="small"),
+            "Skills Encontradas": st.column_config.TextColumn(
+                "Skills Encontradas", width="large", help="Primero las requeridas que aparecen; después otras detectadas."
+            ),
+            "Skills Faltantes": st.column_config.TextColumn(
+                "Skills Faltantes", width="medium", help="Skills requeridas que no aparecen en el CV."
+            ),
+            "Años Exp": st.column_config.NumberColumn(
+                "Años Exp", format="%.1f", width="small", help="Estimado por menciones explícitas o rangos de fechas."
+            ),
+            "Veredicto": st.column_config.TextColumn(
+                "Veredicto",
+                width="small",
+                help=f"PASA > {ats.PASS_THRESHOLD:.0f} · REVISAR {ats.REVIEW_THRESHOLD:.0f}–{ats.PASS_THRESHOLD:.0f} "
+                f"· NO PASA < {ats.REVIEW_THRESHOLD:.0f}",
+            ),
         },
     )
 
 
-def render_detail(ranking: pd.DataFrame) -> None:
-    with st.expander("🔎 Detalle por candidato"):
-        name = st.selectbox("Candidato", ranking["Archivo"].tolist(), label_visibility="collapsed")
-        row = ranking.loc[ranking["Archivo"] == name].iloc[0]
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Score final", f"{row['Score %']:.1f}%")
-        col2.metric("Score semántico", f"{row['Score Semántico %']:.1f}%")
-        coverage = row["Cobertura Skills %"]
-        col3.metric("Cobertura de skills", "—" if pd.isna(coverage) else f"{coverage:.0f}%")
+def render_score_guide(weight_pct: int) -> None:
+    with st.expander("ℹ️ Cómo se lee el score"):
         st.markdown(
-            f"**Email:** {row['Email'] or '—'}  \n"
-            f"**Teléfono:** {row['Teléfono'] or '—'}  \n"
-            f"**LinkedIn:** {row['LinkedIn'] or '—'}  \n"
-            f"**Años de experiencia:** {'—' if pd.isna(row['Años Exp']) else row['Años Exp']}"
+            f"**Score final** = {weight_pct}% *ajuste al puesto* + {100 - weight_pct}% *skills requeridas* "
+            "(sin skills requeridas, es 100% ajuste al puesto).\n\n"
+            "- **🎯 Ajuste al puesto:** cuánto se parece el contenido del CV a la Job Description. Lo calcula un "
+            "modelo de lenguaje, así que reconoce sinónimos y contexto, no solo palabras exactas.\n"
+            "- **🧩 Skills requeridas:** porcentaje de las skills cargadas que aparecen en el CV.\n"
+            "- **📄 Datos legibles:** qué datos pudo leer el filtro (contacto, experiencia, secciones). No suma al "
+            "score, pero si faltan, el CV puede estar mal estructurado o ser difícil de leer para un ATS.\n\n"
+            f"**Veredicto:** :green-badge[PASA] > {ats.PASS_THRESHOLD:.0f} · :orange-badge[REVISAR] "
+            f"{ats.REVIEW_THRESHOLD:.0f}–{ats.PASS_THRESHOLD:.0f} · :red-badge[NO PASA] < {ats.REVIEW_THRESHOLD:.0f}\n\n"
+            "El score sirve para **ordenar y priorizar la lectura**, no es una nota absoluta del CV: un score bajo "
+            "no significa que el candidato no sirva, y los REVISAR merecen una mirada humana."
         )
-        if row["Advertencias"]:
-            st.warning(row["Advertencias"])
+
+
+def badge(text: str, color: str) -> str:
+    """Badge de Markdown de Streamlit; quita corchetes que romperían la sintaxis."""
+    return f":{color}-badge[{text.replace('[', '(').replace(']', ')')}]"
+
+
+def render_candidate_card(
+    result: ats.CandidateResult, required: list[str], jd_words: int, weight_pct: int
+) -> None:
+    with st.container(border=True):
+        score_col, verdict_col = st.columns([1, 3])
+        score_col.metric("Score final", f"{result.score:.1f}%")
+        with verdict_col:
+            st.markdown(
+                f"{badge(result.verdict, VERDICT_BADGE_COLORS[result.verdict])} "
+                f"{ats.VERDICT_MESSAGES[result.verdict]}"
+            )
+            if result.skill_coverage is None:
+                st.caption("Sin skills requeridas: el score final es el ajuste al puesto.")
+            else:
+                st.caption(
+                    f"Cálculo: {weight_pct}% × {result.semantic_score:.1f} (ajuste al puesto) + "
+                    f"{100 - weight_pct}% × {result.skill_coverage:.0f} (skills requeridas) = {result.score:.1f}"
+                )
+
+        fit_col, skills_col, data_col = st.columns(3)
+        with fit_col:
+            st.metric(
+                "🎯 Ajuste al puesto",
+                f"{result.semantic_score:.1f}%",
+                help="Similitud de contenido entre el CV y la Job Description (modelo de lenguaje local).",
+            )
+            st.caption(f"Nivel {ats.fit_label(result.semantic_score).lower()} · pesa {weight_pct}% del score")
+        with skills_col:
+            coverage = result.skill_coverage
+            found_required = [skill for skill in required if skill not in result.missing_skills]
+            st.metric(
+                "🧩 Skills requeridas",
+                "—" if coverage is None else f"{len(found_required)} de {len(required)}",
+                help="Skills cargadas en la barra lateral que aparecen en el CV.",
+            )
+            if required:
+                st.markdown(
+                    " ".join(
+                        [badge(f"✓ {s}", "green") for s in found_required]
+                        + [badge(f"✗ {s}", "red") for s in result.missing_skills]
+                    )
+                )
+            others = [skill for skill in result.found_skills if skill not in required]
+            if others:
+                st.caption("Otras detectadas: " + ", ".join(others))
+        with data_col:
+            checks = ats.data_checks(result)
+            st.metric(
+                "📄 Datos legibles",
+                f"{sum(ok for _, ok in checks)} de {len(checks)}",
+                help="Qué pudo leer el filtro del CV. No suma al score.",
+            )
+            st.markdown("  \n".join(f"{'✅' if ok else '❌'} {label}" for label, ok in checks))
+
+        st.markdown("**Por qué este resultado**")
+        st.markdown("\n".join(f"- {note}" for note in ats.explain_result(result, required, jd_words)))
+
+        years = "—" if result.experience_years is None else f"{result.experience_years:.1f} (estimado)"
+        st.caption(
+            f"Email: {result.email or '—'} · Teléfono: {result.phone or '—'} · "
+            f"LinkedIn: {result.linkedin or '—'} · Años de experiencia: {years}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -223,8 +311,8 @@ with st.sidebar:
             max_value=100,
             value=int(ats.DEFAULT_SEMANTIC_WEIGHT * 100),
             step=5,
-            help="Score final = peso × similitud semántica + (100 − peso) × % de skills requeridas encontradas. "
-            "Sin skills requeridas, el score es 100% semántico.",
+            help="Score final = peso × ajuste al puesto + (100 − peso) × % de skills requeridas encontradas. "
+            "Sin skills requeridas, el score es 100% ajuste al puesto.",
         )
 
     analyze_clicked = st.button("Analizar CVs", type="primary", width="stretch")
@@ -267,8 +355,10 @@ if analyze_clicked:
         for problem in problems:
             st.error(problem)
         st.stop()
-    if len(job_description.split()) < MIN_JD_WORDS:
-        st.warning(f"La Job Description tiene menos de {MIN_JD_WORDS} palabras: el score semántico será menos confiable.")
+    if len(job_description.split()) < ats.MIN_JD_WORDS:
+        st.warning(
+            f"La Job Description tiene menos de {ats.MIN_JD_WORDS} palabras: el ajuste al puesto será menos confiable."
+        )
 
     try:
         model = load_model(ats.DEFAULT_MODEL_NAME)
@@ -314,9 +404,15 @@ if analyze_clicked:
         "csv": ats.to_csv_bytes(ranking),
         "xlsx": ats.to_excel_bytes(ranking, failures_df, parameters),
         "stamp": datetime.now().strftime("%Y%m%d_%H%M"),
+        "results": {result.file_name: result for result in results},
+        "required": required_skills,
+        "jd_words": len(job_description.split()),
+        "weight_pct": weight_pct,
     }
 
 analysis = st.session_state.get("analysis")
+if analysis and "results" not in analysis:  # análisis guardado por una versión anterior de la app
+    analysis = None
 if not analysis:
     st.info(
         "**Cómo usarlo:** pegar la Job Description en la barra lateral, listar las skills requeridas, "
@@ -337,7 +433,8 @@ if ranking.empty:
     st.error("Ningún CV pudo procesarse. Revisar el detalle de los archivos abajo.")
 else:
     render_metrics(ranking, failures_df)
-    render_ranking(ranking)
+    render_score_guide(analysis["weight_pct"])
+    render_ranking(ranking, analysis["weight_pct"])
 
     col_csv, col_xlsx, _ = st.columns([1, 1, 3])
     col_csv.download_button(
@@ -357,8 +454,11 @@ else:
 
     with_warnings = int((ranking["Advertencias"] != "").sum())
     if with_warnings:
-        st.warning(f"{with_warnings} CV(s) con advertencias (por ejemplo, páginas escaneadas). Ver el detalle por candidato.")
-    render_detail(ranking)
+        st.warning(f"{with_warnings} CV(s) con advertencias (por ejemplo, páginas escaneadas). Ver la ficha del candidato.")
+
+    st.subheader("🔎 Ficha del candidato")
+    name = st.selectbox("Candidato", ranking["Archivo"].tolist(), label_visibility="collapsed")
+    render_candidate_card(analysis["results"][name], analysis["required"], analysis["jd_words"], analysis["weight_pct"])
 
 if not failures_df.empty:
     with st.expander(f"⚠️ Archivos no procesados ({len(failures_df)})", expanded=ranking.empty):

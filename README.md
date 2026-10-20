@@ -55,7 +55,9 @@ El resultado muestra:
   Años Exp y Veredicto.
 - Botones para descargar en **CSV** y en **Excel**. El Excel trae colores por veredicto,
   teléfono, LinkedIn, el desglose del score y dos hojas más: archivos con error y parámetros usados.
-- Detalle por candidato (teléfono, LinkedIn, score semántico vs. cobertura de skills, advertencias).
+- **Ficha del candidato:** el cálculo del score con sus números, el ajuste al puesto, las skills
+  requeridas ✓/✗, los datos que se pudieron leer (contacto, experiencia, secciones) y una lectura
+  en palabras de por qué salió ese resultado. La guía *Cómo se lee el score* resume la fórmula.
 - Lista de archivos que no se pudieron leer y por qué.
 
 La primera carga del modelo tarda unos segundos (y más si tiene que descargarlo); después
@@ -63,7 +65,7 @@ queda en memoria y cada CV se procesa en fracciones de segundo en CPU.
 
 ## Cómo se calcula el score
 
-**Score semántico (0-100).** El CV y la JD se convierten en embeddings con
+**Ajuste al puesto (score semántico, 0-100).** El CV y la JD se convierten en embeddings con
 `all-MiniLM-L6-v2` y se comparan con cosine similarity (scikit-learn). Como el modelo
 trunca a 256 tokens, ambos textos se parten en ventanas de 120 palabras con solapamiento:
 para cada fragmento de la JD se busca el fragmento más parecido del CV y se promedian esos

@@ -59,6 +59,9 @@ VERDICT_FAIL = "NO PASA"
 # Peso del score semántico en el score final; el resto es cobertura de skills requeridas.
 DEFAULT_SEMANTIC_WEIGHT = 0.7
 
+# Con menos palabras, la Job Description da poco contexto y el score semántico pierde confiabilidad.
+MIN_JD_WORDS = 30
+
 # Detección de PDFs escaneados: promedio mínimo de caracteres útiles por página
 # para considerar que el PDF tiene capa de texto, y umbral para marcar páginas sueltas.
 MIN_CHARS_PER_PAGE = 100
@@ -132,6 +135,7 @@ class CandidateResult:
     experience_years: float | None
     verdict: str
     warnings: list[str] = field(default_factory=list)
+    sections: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -500,10 +504,35 @@ def canonicalize_skill(skill: str) -> str:
     return display
 
 
+# Rótulos típicos de listas de skills pegadas desde un CV o aviso ("Lenguajes: Go, Python").
+_SKILL_LABEL_WORDS = frozenset(
+    "competencias tecnicas habilidades conocimientos lenguajes languages frameworks "
+    "librerias libraries herramientas tools tecnologias technologies bases datos databases "
+    "plataformas platforms metodologias methodologies otros others skills stack principales "
+    "de y and &".split()
+)
+
+
+def _split_skill_item(item: str) -> list[str]:
+    """Limpia un ítem pegado: ``"JavaScript Frameworks: Fiber (principal)"`` -> ``["JavaScript", "Fiber"]``."""
+    item = re.sub(r"\([^)]*\)", " ", item)
+    *heads, tail = item.split(":")
+    skills = []
+    for head in heads:
+        words = [word for word in head.split() if normalize_text(word) not in _SKILL_LABEL_WORDS]
+        if words:
+            skills.append(" ".join(words))
+    skills.append(tail)
+    return [cleaned for s in skills if (cleaned := s.strip(" \t•·*-–—").rstrip("."))]
+
+
 def parse_skill_list(raw: str) -> list[str]:
-    """Convierte ``"Python, SQL; Power BI"`` en una lista canónica sin duplicados."""
-    items = (canonicalize_skill(item) for item in re.split(r"[,;\n]", raw or "") if item.strip())
-    return list(dict.fromkeys(items))
+    """Convierte ``"Python, SQL; Power BI"`` en una lista canónica sin duplicados.
+
+    Tolera texto pegado: ignora rótulos ("Lenguajes:") y aclaraciones entre paréntesis.
+    """
+    items = (skill for chunk in re.split(r"[,;\n|•]", raw or "") for skill in _split_skill_item(chunk))
+    return list(dict.fromkeys(canonicalize_skill(item) for item in items))
 
 
 def _skill_pattern(skill: str) -> re.Pattern[str]:
@@ -715,6 +744,32 @@ _OTHER_HEADER_RE = re.compile(
     r"publicaciones|publications|perfil(?: profesional)?|profile|resumen|summary|sobre mi|"
     r"about me|contacto|contact|datos personales)"
 )
+
+
+_SECTION_HEADERS: dict[str, re.Pattern[str]] = {
+    "Perfil": re.compile(r"perfil(?: profesional)?|profile|resumen(?: profesional)?|summary|sobre mi|about me|objetivo"),
+    "Experiencia": _EXPERIENCE_HEADER_RE,
+    "Educación": re.compile(r"educacion|formacion(?: academica)?|estudios|education|academic background"),
+    "Habilidades": re.compile(
+        r"habilidades(?: tecnicas)?|(?:technical |hard |soft )?skills|competencias(?: tecnicas)?|"
+        r"aptitudes|conocimientos|tecnologias|stack(?: tecnologico)?"
+    ),
+    "Idiomas": re.compile(r"idiomas|languages"),
+}
+
+
+def detect_sections(text: str) -> list[str]:
+    """Secciones estándar reconocidas por su encabezado (Perfil, Experiencia, Educación...).
+
+    Si un CV no tiene encabezados legibles, un ATS también tiene problemas para clasificarlo.
+    """
+    found: set[str] = set()
+    for line in normalize_text(text).splitlines():
+        header = _HEADER_CLEAN_RE.sub("", line).strip(" :")
+        if not header or len(header) > 40:
+            continue
+        found.update(name for name, pattern in _SECTION_HEADERS.items() if pattern.fullmatch(header))
+    return [name for name in _SECTION_HEADERS if name in found]
 
 
 def extract_experience_years(text: str, today: date | None = None) -> float | None:
@@ -945,6 +1000,75 @@ def get_verdict(score: float) -> str:
     return VERDICT_FAIL
 
 
+VERDICT_MESSAGES: dict[str, str] = {
+    VERDICT_PASS: "Buen ajuste para la búsqueda: priorizar este CV.",
+    VERDICT_REVIEW: "Ajuste medio: leer el CV antes de decidir.",
+    VERDICT_FAIL: "Bajo ajuste para esta búsqueda.",
+}
+
+
+def fit_label(score: float) -> str:
+    """Nivel "Alto", "Medio" o "Bajo" de un score 0-100, con los umbrales del veredicto."""
+    return {VERDICT_PASS: "Alto", VERDICT_REVIEW: "Medio", VERDICT_FAIL: "Bajo"}[get_verdict(score)]
+
+
+def data_checks(result: CandidateResult) -> list[tuple[str, bool]]:
+    """Datos que el filtro pudo leer del CV. No suman al score: si falta alguno, el CV puede
+    estar mal estructurado o ser poco legible para un ATS, y conviene mirarlo a mano."""
+    return [
+        ("Email", bool(result.email)),
+        ("Teléfono", bool(result.phone)),
+        ("LinkedIn", bool(result.linkedin)),
+        ("Años de experiencia", result.experience_years is not None),
+        *((f"Sección {name}", name in result.sections) for name in ("Experiencia", "Educación", "Habilidades")),
+    ]
+
+
+def explain_result(
+    result: CandidateResult, required_skills: Sequence[str], job_description_words: int
+) -> list[str]:
+    """Lectura en palabras de un resultado: qué empujó el score para arriba o para abajo."""
+    notes: list[str] = []
+    if job_description_words < MIN_JD_WORDS:
+        notes.append(
+            f"La Job Description tiene {job_description_words} palabras: el ajuste al puesto es poco "
+            "confiable. Pegar el aviso completo (responsabilidades, requisitos, stack)."
+        )
+
+    semantic = result.semantic_score
+    if semantic > PASS_THRESHOLD:
+        notes.append("El contenido del CV está muy alineado con la Job Description.")
+    elif semantic >= REVIEW_THRESHOLD:
+        notes.append("El contenido del CV coincide en parte con la Job Description.")
+    else:
+        notes.append("El contenido del CV se parece poco a la Job Description (rol, responsabilidades o sector distintos).")
+
+    required = list(dict.fromkeys(canonicalize_skill(s) for s in required_skills if s.strip()))
+    coverage = result.skill_coverage
+    missing = result.missing_skills
+    if coverage is None:
+        notes.append("No se cargaron skills requeridas: el score es 100% ajuste al puesto.")
+    elif not missing:
+        notes.append(f"Tiene las {len(required)} skills requeridas.")
+    elif len(missing) == len(required):
+        notes.append("No aparece ninguna de las skills requeridas.")
+    else:
+        notes.append(f"Le faltan {len(missing)} de {len(required)} skills requeridas: {', '.join(missing)}.")
+
+    if coverage is not None and coverage >= 80 and semantic < REVIEW_THRESHOLD:
+        notes.append("Menciona las skills pedidas, pero el resto del perfil difiere de la búsqueda: confirmar que el rol coincida.")
+    elif coverage is not None and coverage < 50 and semantic > PASS_THRESHOLD:
+        notes.append("El perfil encaja pero faltan skills clave: pueden figurar con otro nombre o confirmarse en entrevista.")
+
+    long_items = [skill for skill in required if len(skill.split()) > 4]
+    if long_items:
+        notes.append(f"Revisar las skills requeridas: «{long_items[0]}» parece texto pegado, no una skill.")
+    if result.experience_years is None:
+        notes.append("No se detectaron años de experiencia (sin menciones ni rangos de fechas legibles).")
+    notes.extend(result.warnings)
+    return notes
+
+
 # ---------------------------------------------------------------------------
 # Orquestación
 # ---------------------------------------------------------------------------
@@ -982,6 +1106,7 @@ def analyze_cv(
         experience_years=extract_experience_years(cv_text),
         verdict=get_verdict(score),
         warnings=list(warnings),
+        sections=detect_sections(cv_text),
     )
 
 
@@ -1052,8 +1177,8 @@ DISPLAY_COLUMNS: list[str] = [
     "Archivo", "Email", "Score %", "Skills Encontradas", "Skills Faltantes", "Años Exp", "Veredicto",
 ]
 EXPORT_COLUMNS: list[str] = [
-    "Archivo", "Email", "Teléfono", "LinkedIn", "Score %", "Score Semántico %", "Cobertura Skills %",
-    "Skills Encontradas", "Skills Faltantes", "Años Exp", "Veredicto", "Advertencias",
+    "Archivo", "Email", "Teléfono", "LinkedIn", "Score %", "Ajuste al Puesto %", "Cobertura Skills %",
+    "Skills Encontradas", "Skills Faltantes", "Años Exp", "Veredicto", "Secciones Detectadas", "Advertencias",
 ]
 FAILURE_COLUMNS: list[str] = ["Archivo", "Tipo", "Detalle"]
 
@@ -1073,18 +1198,19 @@ def results_to_dataframe(results: Iterable[CandidateResult]) -> pd.DataFrame:
             "Teléfono": r.phone,
             "LinkedIn": r.linkedin,
             "Score %": r.score,
-            "Score Semántico %": r.semantic_score,
+            "Ajuste al Puesto %": r.semantic_score,
             "Cobertura Skills %": r.skill_coverage,
             "Skills Encontradas": ", ".join(r.found_skills),
             "Skills Faltantes": ", ".join(r.missing_skills),
             "Años Exp": r.experience_years,
             "Veredicto": r.verdict,
+            "Secciones Detectadas": ", ".join(r.sections),
             "Advertencias": " | ".join(r.warnings),
         }
         for r in results
     ]
     frame = pd.DataFrame(rows, columns=EXPORT_COLUMNS)
-    frame = frame.sort_values(["Score %", "Score Semántico %"], ascending=False, kind="stable")
+    frame = frame.sort_values(["Score %", "Ajuste al Puesto %"], ascending=False, kind="stable")
     return frame.reset_index(drop=True)
 
 
@@ -1133,7 +1259,7 @@ def to_excel_bytes(
 
         ranking_sheet = writer.sheets["Ranking"]
         columns = list(ranking.columns)
-        for name in ("Score %", "Score Semántico %", "Cobertura Skills %", "Años Exp"):
+        for name in ("Score %", "Ajuste al Puesto %", "Cobertura Skills %", "Años Exp"):
             if name in columns:
                 for row in range(2, ranking_sheet.max_row + 1):
                     ranking_sheet.cell(row, columns.index(name) + 1).number_format = "0.0"
