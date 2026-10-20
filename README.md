@@ -155,10 +155,19 @@ tocar la red. Para garantizar que nunca haya conexión, definir `HF_HUB_OFFLINE=
 
 En la nube la opción **Carpeta local** se oculta sola: solo se pueden subir archivos.
 
+**Contraseña de acceso.** Community Cloud permite una sola app privada por cuenta, así que la
+app trae su propia pantalla de contraseña. En *Settings → Secrets* de la app cargar:
+
+```toml
+APP_PASSWORD = "la-clave-elegida"
+```
+
+Sin ese secret la app queda abierta (es lo que pasa en uso local). Localmente también se
+puede activar con `.streamlit/secrets.toml` (ignorado por git) o la variable `ATS_APP_PASSWORD`.
+
 > **Privacidad:** publicada, la app ya no es local: los CVs se procesan en servidores de
-> Streamlit (en memoria, no se guardan ni los ven otros usuarios). Para candidatos reales,
-> configurar la app como privada (*Settings → Sharing → Only specific people*) e invitar solo
-> a quienes la usen.
+> Streamlit, en memoria. No se guardan y cada sesión es independiente, así que nadie ve los
+> CVs que sube otra persona.
 
 ## Estructura
 

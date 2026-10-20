@@ -11,6 +11,7 @@ este módulo solo maneja inputs, estado de la sesión y presentación.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import logging
 import os
 from datetime import datetime
@@ -152,8 +153,44 @@ def render_detail(ranking: pd.DataFrame) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Acceso
+# ---------------------------------------------------------------------------
+
+
+def configured_password() -> str | None:
+    """Contraseña de acceso: secret ``APP_PASSWORD`` (Streamlit Cloud) o variable ``ATS_APP_PASSWORD``.
+
+    Sin ninguna de las dos, la app queda abierta (uso local).
+    """
+    try:
+        password = st.secrets.get("APP_PASSWORD")
+    except Exception:  # sin secrets.toml, Streamlit lanza al leer st.secrets
+        password = None
+    return str(password) if password else os.getenv("ATS_APP_PASSWORD") or None
+
+
+def require_password() -> None:
+    """Muestra el ingreso y corta la ejecución hasta que se ingrese la contraseña correcta."""
+    expected = configured_password()
+    if not expected or st.session_state.get("authenticated"):
+        return
+    st.title("📄 Filtro ATS de CVs")
+    with st.form("login"):
+        password = st.text_input("Contraseña", type="password")
+        submitted = st.form_submit_button("Ingresar", type="primary")
+    if submitted:
+        if hmac.compare_digest(password.encode("utf-8"), expected.encode("utf-8")):
+            st.session_state["authenticated"] = True
+            st.rerun()
+        st.error("Contraseña incorrecta.")
+    st.stop()
+
+
+# ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
+
+require_password()
 
 with st.sidebar:
     st.header("Configuración")
