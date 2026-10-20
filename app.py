@@ -36,7 +36,10 @@ VERDICT_BADGE_COLORS: dict[str, str] = {
     ats.VERDICT_REVIEW: "orange",
     ats.VERDICT_FAIL: "red",
 }
+LEVEL_TO_VERDICT: dict[str, str] = {"Alto": ats.VERDICT_PASS, "Medio": ats.VERDICT_REVIEW, "Bajo": ats.VERDICT_FAIL}
 EXCEL_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+MODE_RANKING = "Ranking de CVs"
+MODE_AREAS = "Afinidad por área"
 
 # Streamlit Community Cloud monta el repo en /mount/src. Ahí "Carpeta local" sería el disco
 # del servidor, no el del usuario: se oculta (también se puede apagar con la variable de entorno).
@@ -240,6 +243,124 @@ def render_candidate_card(
         )
 
 
+def style_level(value: str) -> str:
+    return VERDICT_STYLES.get(LEVEL_TO_VERDICT.get(value, ""), "")
+
+
+def render_area_guide() -> None:
+    weight = int(ats.AREA_SEMANTIC_WEIGHT * 100)
+    with st.expander("ℹ️ Cómo se lee la afinidad"):
+        st.markdown(
+            "Cada área tiene un **perfil genérico** (descripción del rol + skills típicas) que hace de Job "
+            "Description.\n\n"
+            f"- **Afinidad** = {weight}% *ajuste al perfil* + {100 - weight}% *skills típicas del área*.\n"
+            f"- **Skills típicas:** con {ats.AREA_SKILL_TARGET} encontradas la parte de skills ya cuenta completa "
+            "(nadie usa todas las de un área).\n"
+            f"- **Nivel:** :green-badge[Alto] > {ats.PASS_THRESHOLD:.0f} · :orange-badge[Medio] "
+            f"{ats.REVIEW_THRESHOLD:.0f}–{ats.PASS_THRESHOLD:.0f} · :red-badge[Bajo] < {ats.REVIEW_THRESHOLD:.0f}\n\n"
+            "Es **orientativo**: dice hacia qué área apunta el CV, no si sirve para una búsqueda puntual. "
+            "Para eso, usar el modo **Ranking de CVs** con la Job Description real."
+        )
+    with st.expander("📚 Ver los perfiles de cada área"):
+        for area in ats.AREA_PROFILES:
+            st.markdown(f"**{area.name}** — {area.description}  \n*Skills típicas:* {', '.join(area.skills)}")
+
+
+def render_area_mode() -> None:
+    """Modo "Afinidad por área": un CV contra los perfiles genéricos de ats.AREA_PROFILES."""
+    area_names = [area.name for area in ats.AREA_PROFILES]
+    with st.sidebar:
+        st.header("Configuración")
+        uploaded_cv = st.file_uploader("CV (PDF o DOCX)", type=["pdf", "docx"], key="area_cv")
+        selected = st.multiselect("Áreas a comparar", area_names, default=area_names, key="area_names")
+        compare_clicked = st.button("Comparar áreas", type="primary", width="stretch")
+
+    st.title("🧭 Afinidad del CV por área")
+    st.caption("Compara un CV contra perfiles típicos de cada área laboral, sin necesidad de una Job Description.")
+
+    signature = inputs_signature((uploaded_cv.name, uploaded_cv.size) if uploaded_cv else None, selected)
+    if compare_clicked:
+        if uploaded_cv is None:
+            st.error("Falta subir el CV.")
+            st.stop()
+        if not selected:
+            st.error("Elegir al menos un área.")
+            st.stop()
+        try:
+            extraction = extract_cached(uploaded_cv.getvalue(), uploaded_cv.name)
+            model = load_model(ats.DEFAULT_MODEL_NAME)
+        except (ats.ExtractionError, RuntimeError) as exc:
+            st.error(f"No se pudo analizar el CV: {exc}")
+            st.stop()
+        areas = [area for area in ats.AREA_PROFILES if area.name in selected]
+        with st.spinner(f"Comparando contra {len(areas)} áreas…"):
+            fits = ats.score_by_area(extraction.text, areas, model=model)
+        st.session_state["area_analysis"] = {
+            "signature": signature,
+            "file_name": uploaded_cv.name,
+            "fits": fits,
+            "warnings": extraction.warnings,
+        }
+
+    result = st.session_state.get("area_analysis")
+    if not result:
+        st.info(
+            "**Cómo usarlo:** subir un CV en la barra lateral, elegir las áreas (por defecto, todas) y presionar "
+            "**Comparar áreas**.\n\nSirve para ver a qué tipo de puesto apunta un CV. Para evaluar una búsqueda "
+            "concreta, usar el modo **Ranking de CVs** con la Job Description real."
+        )
+        render_area_guide()
+        return
+    if result["signature"] != signature:
+        st.info("El CV o las áreas cambiaron: presionar **Comparar áreas** para actualizar.")
+
+    fits: list[ats.AreaFit] = result["fits"]
+    best = fits[0]
+    level = ats.fit_label(best.score)
+    st.markdown(
+        f"#### Mejor ajuste: {best.area} · {best.score:.1f}% "
+        f"{badge(f'Nivel {level.lower()}', VERDICT_BADGE_COLORS[LEVEL_TO_VERDICT[level]])}"
+    )
+    runner_up = f" Le sigue **{fits[1].area}** ({fits[1].score:.1f}%)." if len(fits) > 1 else ""
+    st.caption(f"{result['file_name']} · skills del área encontradas: {', '.join(best.found_skills) or '—'}.{runner_up}")
+    if best.score < ats.REVIEW_THRESHOLD:
+        st.warning(
+            "Ninguna área llega a nivel medio: el CV no encaja claramente en estos perfiles (puede ser de otro "
+            "rubro) o su texto se leyó mal."
+        )
+    for warning in result["warnings"]:
+        st.warning(warning)
+
+    render_area_guide()
+    frame = ats.areas_to_dataframe(fits)
+    weight = int(ats.AREA_SEMANTIC_WEIGHT * 100)
+    st.dataframe(
+        frame.style.map(style_level, subset=["Nivel"]),
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "Afinidad %": st.column_config.ProgressColumn(
+                "Afinidad %",
+                min_value=0,
+                max_value=100,
+                format="%.1f%%",
+                help=f"{weight}% ajuste al perfil + {100 - weight}% skills típicas del área.",
+            ),
+            "Ajuste al Perfil %": st.column_config.NumberColumn(
+                "Ajuste al Perfil %", format="%.1f", help="Similitud de contenido entre el CV y el perfil del área."
+            ),
+            "Skills del Área Encontradas": st.column_config.TextColumn(width="large"),
+            "Skills Típicas que No Aparecen": st.column_config.TextColumn(width="large"),
+        },
+    )
+    st.download_button(
+        "⬇️ Descargar CSV",
+        data=ats.to_csv_bytes(frame),
+        file_name=f"afinidad_areas_{Path(result['file_name']).stem}.csv",
+        mime="text/csv",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Acceso
 # ---------------------------------------------------------------------------
@@ -281,6 +402,17 @@ def require_password() -> None:
 require_password()
 
 with st.sidebar:
+    mode = st.radio(
+        "Modo",
+        [MODE_RANKING, MODE_AREAS],
+        key="mode",
+        help="Ranking: varios CVs contra una Job Description. Afinidad: un CV contra perfiles típicos de cada área.",
+    )
+if mode == MODE_AREAS:
+    render_area_mode()
+    st.stop()
+
+with st.sidebar:
     st.header("Configuración")
     job_description = st.text_area(
         "Job Description",
@@ -294,7 +426,7 @@ with st.sidebar:
 
     source = "upload"
     if FOLDER_MODE_ENABLED:
-        source_label = st.radio("Origen de los CVs", ["Subir archivos", "Carpeta local"], horizontal=True)
+        source_label = st.radio("Origen de los CVs", ["Subir archivos", "Carpeta local"], horizontal=True, key="source")
         source = "upload" if source_label == "Subir archivos" else "folder"
     uploaded: list = []
     folder, recursive = "", False

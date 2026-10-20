@@ -63,6 +63,18 @@ El resultado muestra:
 La primera carga del modelo tarda unos segundos (y más si tiene que descargarlo); después
 queda en memoria y cada CV se procesa en fracciones de segundo en CPU.
 
+### Modo "Afinidad por área"
+
+Para ver a qué tipo de puesto apunta un CV sin tener una Job Description: elegir el modo
+**Afinidad por área**, subir un CV y presionar **Comparar áreas**. El CV se compara contra 14
+perfiles genéricos (Backend, Frontend, Mobile, Data Engineering, Data Analytics/BI, Data
+Science, DevOps/Cloud, QA, UX/UI, Marketing Digital, Social Media, Gestión de Proyectos,
+Comercial, Administración y Finanzas) y sale una tabla ordenada por afinidad.
+
+Afinidad = 70% ajuste al perfil del área + 30% skills típicas del área (con 4 encontradas ya
+cuenta completa). Es orientativo: para una búsqueda concreta, usar el modo Ranking con la JD
+real. Los perfiles están en `AREA_PROFILES` (`ats_parser.py`) y se pueden editar o ampliar.
+
 ## Cómo se calcula el score
 
 **Ajuste al puesto (score semántico, 0-100).** El CV y la JD se convierten en embeddings con
@@ -85,7 +97,7 @@ se ajusta en *Opciones avanzadas*. Sin skills requeridas, el score es 100% semá
 | Email | Regex; también lo toma de los links `mailto:` del PDF/DOCX. |
 | Teléfono | Regex; prioriza números con etiqueta (Tel, Cel, WhatsApp) y descarta DNI/CUIT, fechas y rangos de años. |
 | LinkedIn | Regex sobre el texto **y** sobre los hipervínculos (muchos CVs dicen solo "LinkedIn" con el link escondido). |
-| Skills | Catálogo predefinido de 76 skills de datos/BI/cloud con alias (`t-sql` → sql, `ms fabric` → fabric, `pyspark` → spark + python). Las skills requeridas que no están en el catálogo se buscan literalmente. |
+| Skills | Catálogo predefinido de 118 skills (datos, BI, cloud, desarrollo, QA, diseño, marketing) con alias (`t-sql` → sql, `ms fabric` → fabric, `pyspark` → spark + python). Las skills requeridas que no están en el catálogo se buscan literalmente. |
 | Años de experiencia | Menciones explícitas ("5 años de experiencia", "5+ years", "más de 5 años", "with 7 years") y suma de rangos de fechas de la sección Experiencia ("Ene 2019 - Actualidad"), sin contar doble los períodos solapados ni la sección Educación. |
 
 En DOCX se leen párrafos, tablas (incluidas las anidadas), encabezados/pies y cuadros de texto.

@@ -443,16 +443,66 @@ SKILL_CATALOG: dict[str, tuple[str, ...]] = {
     "api rest": (r"apis? rest(?:ful)?", r"rest(?:ful)? apis?"),
     "sap": (r"sap",),
     "salesforce": (r"salesforce",),
+    # Desarrollo web y mobile
+    "php": (r"php",),
+    "kotlin": (r"kotlin",),
+    "swift": (r"swift(?:ui)?",),
+    "flutter": (r"flutter",),
+    "node.js": (r"node(?:\.?js)?",),
+    "react": (r"react(?:\.?js)?",),
+    "react native": (r"react native",),
+    "angular": (r"angular(?:\.?js)?",),
+    "vue": (r"vue(?:\.?js)?",),
+    "next.js": (r"next\.?js",),
+    "html": (r"html5?",),
+    "css": (r"css3?", r"sass", r"scss"),
+    "tailwind": (r"tailwind(?: ?css)?",),
+    "django": (r"django",),
+    "flask": (r"flask",),
+    "fastapi": (r"fast ?api",),
+    "spring": (r"spring", r"spring ?boot", r"spring framework", r"spring mvc"),
+    "microservicios": (r"microservicios?", r"microservices?"),
+    # DevOps y QA
+    "terraform": (r"terraform",),
+    "jenkins": (r"jenkins",),
+    "github actions": (r"github actions",),
+    "selenium": (r"selenium",),
+    "cypress": (r"cypress",),
+    "playwright": (r"playwright",),
+    "postman": (r"postman",),
+    "jmeter": (r"j ?meter",),
+    "jest": (r"jest",),
+    # Diseño
+    "figma": (r"figma",),
+    "adobe xd": (r"adobe xd",),
+    "photoshop": (r"photoshop",),
+    "illustrator": (r"illustrator",),
+    "canva": (r"canva",),
+    # Marketing digital y comercial
+    "meta ads": (r"meta ads", r"facebook ads", r"instagram ads", r"(?:facebook|meta) business manager"),
+    "google ads": (r"google ads", r"(?:google )?adwords"),
+    "tiktok ads": (r"tiktok ads",),
+    "seo": (r"seo",),
+    "sem": (r"sem",),
+    "google tag manager": (r"google tag manager", r"gtm"),
+    "email marketing": (r"e-?mail marketing", r"mailchimp"),
+    "hubspot": (r"hubspot",),
+    "crm": (r"crm",),
     # Metodologías e idiomas
     "scrum": (r"scrum",),
     "agile": (r"agile", r"metodologias? agil(?:es)?", r"kanban"),
     "jira": (r"jira",),
+    "confluence": (r"confluence",),
     "inglés": (r"ingles", r"english"),
 }
 
 # Alias que se aceptan al canonizar lo que escribe el usuario, pero que son demasiado
-# ambiguos para buscarlos sueltos en un CV ("R", "go").
-_INPUT_ONLY_ALIASES: dict[str, frozenset[str]] = {"r": frozenset({r"r"}), "go": frozenset({r"go"})}
+# ambiguos para buscarlos sueltos en un CV ("R", "go", "spring" como estación del año).
+_INPUT_ONLY_ALIASES: dict[str, frozenset[str]] = {
+    "r": frozenset({r"r"}),
+    "go": frozenset({r"go"}),
+    "spring": frozenset({r"spring"}),
+}
 
 # Una skill detectada implica otras (quien usa PostgreSQL sabe SQL, PySpark implica Spark y Python).
 IMPLIED_SKILLS: dict[str, tuple[str, ...]] = {
@@ -467,6 +517,17 @@ IMPLIED_SKILLS: dict[str, tuple[str, ...]] = {
     "pandas": ("python",),
     "numpy": ("python",),
     "scikit-learn": ("python",),
+    "django": ("python",),
+    "flask": ("python",),
+    "fastapi": ("python",),
+    "spring": ("java",),
+    "node.js": ("javascript",),
+    "react": ("javascript",),
+    "react native": ("react", "javascript"),
+    "vue": ("javascript",),
+    "next.js": ("react", "javascript"),
+    "github actions": ("ci/cd", "git"),
+    "jenkins": ("ci/cd",),
 }
 
 _BOUNDARY_BEFORE = r"(?<![a-z0-9_+#])"
@@ -938,7 +999,7 @@ def _encode(model: SentenceTransformer, chunks: list[str]) -> np.ndarray:
     )
 
 
-@lru_cache(maxsize=8)
+@lru_cache(maxsize=32)
 def _job_embeddings(model: SentenceTransformer, job_description: str) -> np.ndarray:
     """Embeddings de la JD, cacheados: la misma JD se compara contra todos los CVs."""
     embeddings = _encode(model, _chunk_text(job_description))
@@ -1167,6 +1228,208 @@ def analyze_files(
     if on_progress:
         on_progress(total, total, "")
     return results, failures
+
+
+# ---------------------------------------------------------------------------
+# Afinidad por área laboral
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AreaProfile:
+    """Perfil genérico de un área: hace de Job Description y trae sus skills típicas."""
+
+    name: str
+    description: str
+    skills: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class AreaFit:
+    """Afinidad de un CV con un área."""
+
+    area: str
+    score: float
+    semantic_score: float
+    skill_signal: float
+    found_skills: list[str]
+    missing_skills: list[str]
+
+
+# Con esta cantidad de skills típicas del área encontradas, la señal de skills ya es 100:
+# nadie tiene todas las de un área (un backend no usa Go, Java y PHP a la vez).
+AREA_SKILL_TARGET = 4
+AREA_SEMANTIC_WEIGHT = DEFAULT_SEMANTIC_WEIGHT
+
+AREA_PROFILES: tuple[AreaProfile, ...] = (
+    AreaProfile(
+        "Desarrollo Backend",
+        "Desarrollador backend: diseño e implementación de APIs REST y microservicios, lógica de negocio del "
+        "lado del servidor, integración con bases de datos SQL y NoSQL, autenticación, colas de mensajes, "
+        "performance y escalabilidad. Lenguajes como Go, Java, Python, Node.js, C# o PHP; frameworks como "
+        "Spring Boot, Django, FastAPI o .NET; Docker, testing unitario y de integración, Git.",
+        ("go", "java", "python", "node.js", "c#", "php", "api rest", "microservicios", "spring", "django",
+         "fastapi", "postgresql", "mongodb", "docker"),
+    ),
+    AreaProfile(
+        "Desarrollo Frontend",
+        "Desarrollador frontend: construcción de interfaces web responsivas y accesibles, componentes "
+        "reutilizables, consumo de APIs, manejo de estado y performance en el navegador. JavaScript y "
+        "TypeScript con React, Angular o Vue; HTML, CSS, Sass, Tailwind, Next.js; testing con Jest o Cypress; "
+        "trabajo junto a diseño UX/UI en Figma.",
+        ("javascript", "typescript", "react", "angular", "vue", "next.js", "html", "css", "tailwind", "jest",
+         "figma"),
+    ),
+    AreaProfile(
+        "Desarrollo Mobile",
+        "Desarrollador mobile: aplicaciones nativas o multiplataforma para Android e iOS, interfaces móviles, "
+        "integración con APIs, notificaciones, publicación en App Store y Google Play, performance y testing "
+        "en dispositivos. Kotlin, Swift, Flutter, React Native, Java.",
+        ("kotlin", "swift", "flutter", "react native", "java", "api rest", "git"),
+    ),
+    AreaProfile(
+        "Data Engineering",
+        "Ingeniero de datos: construcción y mantenimiento de pipelines ETL/ELT, ingesta de fuentes diversas, "
+        "modelado de datos en data warehouse y data lake, orquestación y calidad de datos. SQL avanzado, "
+        "Python, Spark y PySpark, Airflow, dbt, Kafka; nube Azure (Data Factory, Synapse, Fabric), AWS o GCP "
+        "(BigQuery); Databricks y Snowflake.",
+        ("sql", "python", "spark", "etl", "airflow", "dbt", "kafka", "databricks", "azure data factory",
+         "fabric", "bigquery", "snowflake", "data warehouse"),
+    ),
+    AreaProfile(
+        "Data Analytics / BI",
+        "Analista de datos y business intelligence: análisis de indicadores de negocio, dashboards y reportes, "
+        "definición de KPIs, consultas SQL, limpieza y modelado de datos para visualización, presentación de "
+        "hallazgos a las áreas de negocio. Power BI con DAX, Tableau, Looker Studio, Excel avanzado, SQL, "
+        "Python o R.",
+        ("sql", "power bi", "dax", "tableau", "looker studio", "excel", "python", "estadística",
+         "google analytics", "power query"),
+    ),
+    AreaProfile(
+        "Data Science / Machine Learning",
+        "Científico de datos: modelos predictivos y de clasificación, machine learning, estadística y "
+        "experimentación, feature engineering, evaluación y puesta en producción de modelos, NLP o visión "
+        "por computadora. Python con pandas, NumPy, scikit-learn, TensorFlow o PyTorch; SQL; MLOps.",
+        ("python", "machine learning", "estadística", "pandas", "numpy", "scikit-learn", "tensorflow",
+         "pytorch", "deep learning", "nlp", "sql"),
+    ),
+    AreaProfile(
+        "DevOps / Cloud",
+        "Ingeniero DevOps y cloud: infraestructura en la nube AWS, Azure o GCP, automatización de "
+        "despliegues, pipelines de CI/CD, contenedores e infraestructura como código, monitoreo, seguridad "
+        "y confiabilidad de sistemas en producción. Docker, Kubernetes, Terraform, Jenkins o GitHub Actions, "
+        "Linux, scripting en Bash o Python.",
+        ("aws", "azure", "gcp", "docker", "kubernetes", "terraform", "ci/cd", "jenkins", "github actions",
+         "linux", "bash"),
+    ),
+    AreaProfile(
+        "QA / Testing",
+        "Analista QA y tester: diseño y ejecución de casos de prueba, pruebas funcionales, de regresión, de "
+        "integración y de performance, automatización de pruebas, reporte y seguimiento de defectos en "
+        "equipos ágiles. Selenium, Cypress, Playwright, Postman, JMeter, Jira; SQL y APIs.",
+        ("selenium", "cypress", "playwright", "postman", "jmeter", "jira", "api rest", "sql", "scrum",
+         "testing"),
+    ),
+    AreaProfile(
+        "Diseño UX/UI",
+        "Diseñador UX/UI: investigación de usuarios, arquitectura de información, wireframes, prototipos "
+        "interactivos y diseño visual de interfaces digitales, design systems, pruebas de usabilidad y "
+        "accesibilidad, trabajo junto a producto y desarrollo. Figma, Adobe XD, Photoshop, Illustrator.",
+        ("figma", "adobe xd", "photoshop", "illustrator", "prototipos", "wireframes", "usabilidad",
+         "design system"),
+    ),
+    AreaProfile(
+        "Marketing Digital / Performance",
+        "Especialista en marketing digital y performance: planificación y optimización de campañas pagas en "
+        "Meta Ads, Google Ads y TikTok Ads, SEO y SEM, medición con Google Analytics 4 y Google Tag Manager, "
+        "reportes de KPIs como CPL, CPA, CTR y ROAS, gestión del presupuesto de pauta, email marketing y CRM.",
+        ("meta ads", "google ads", "tiktok ads", "seo", "sem", "google analytics", "google tag manager",
+         "email marketing", "crm", "hubspot"),
+    ),
+    AreaProfile(
+        "Social Media / Contenidos",
+        "Community manager y social media: estrategia y calendario de contenidos para redes sociales como "
+        "Instagram, TikTok y Facebook, redacción y copywriting, gestión de la comunidad, campañas con "
+        "influencers, métricas de alcance e interacción, coordinación con diseño. Canva, Meta Business Suite.",
+        ("instagram", "tiktok", "facebook", "copywriting", "community manager", "canva", "calendario editorial",
+         "influencers"),
+    ),
+    AreaProfile(
+        "Gestión de Proyectos / Agile",
+        "Project manager o Scrum master: planificación y seguimiento de proyectos, gestión de alcance, "
+        "tiempos, riesgos y presupuesto, coordinación de equipos multidisciplinarios y stakeholders, "
+        "metodologías ágiles Scrum y Kanban, ceremonias y métricas del equipo. Jira, Confluence, MS Project, "
+        "certificaciones PMP o Scrum.",
+        ("scrum", "agile", "jira", "confluence", "pmp", "ms project", "stakeholders", "gestión de proyectos"),
+    ),
+    AreaProfile(
+        "Comercial / Ventas",
+        "Ejecutivo comercial: prospección y desarrollo de nuevos clientes, gestión de cartera, negociación y "
+        "cierre de ventas, cumplimiento de objetivos, propuestas comerciales, seguimiento en CRM y relación "
+        "con cuentas clave. Salesforce, HubSpot, Excel.",
+        ("crm", "salesforce", "hubspot", "negociación", "prospección", "ventas", "cartera de clientes", "excel"),
+    ),
+    AreaProfile(
+        "Administración y Finanzas",
+        "Analista administrativo contable y de finanzas: registraciones contables, conciliaciones bancarias, "
+        "cuentas a pagar y a cobrar, liquidación de impuestos, presupuestos y reportes financieros, control "
+        "de gestión y cierres mensuales. Excel avanzado, SAP, Tango u otros ERP.",
+        ("contabilidad", "conciliaciones", "impuestos", "presupuestos", "facturación", "excel", "sap", "tango",
+         "erp"),
+    ),
+)
+
+
+def score_by_area(
+    cv_text: str,
+    areas: Sequence[AreaProfile] = AREA_PROFILES,
+    *,
+    model: SentenceTransformer | None = None,
+    semantic_weight: float = AREA_SEMANTIC_WEIGHT,
+) -> list[AreaFit]:
+    """Afinidad de un CV con cada área, de mayor a menor.
+
+    Cada área se evalúa como si su perfil fuera la Job Description: ajuste al perfil
+    (:func:`score_cv`) más una señal de skills típicas encontradas, que llega a 100 con
+    :data:`AREA_SKILL_TARGET` skills.
+    """
+    if model is None:
+        model = get_model()
+    all_skills = {skill for area in areas for skill in area.skills}
+    detected = set(detect_skills(cv_text, extra_skills=all_skills))
+    fits: list[AreaFit] = []
+    for area in areas:
+        canonical = list(dict.fromkeys(canonicalize_skill(skill) for skill in area.skills))
+        found = [skill for skill in canonical if skill in detected]
+        signal = round(100.0 * min(len(found) / AREA_SKILL_TARGET, 1.0), 1)
+        semantic = score_cv(cv_text, area.description, model=model)
+        fits.append(
+            AreaFit(
+                area=area.name,
+                score=combine_scores(semantic, signal, semantic_weight),
+                semantic_score=semantic,
+                skill_signal=signal,
+                found_skills=found,
+                missing_skills=[skill for skill in canonical if skill not in detected],
+            )
+        )
+    return sorted(fits, key=lambda fit: (fit.score, fit.semantic_score), reverse=True)
+
+
+def areas_to_dataframe(fits: Iterable[AreaFit]) -> pd.DataFrame:
+    """Tabla de afinidad por área, en el orden recibido."""
+    rows = [
+        {
+            "Área": fit.area,
+            "Afinidad %": fit.score,
+            "Nivel": fit_label(fit.score),
+            "Ajuste al Perfil %": fit.semantic_score,
+            "Skills del Área Encontradas": ", ".join(fit.found_skills),
+            "Skills Típicas que No Aparecen": ", ".join(fit.missing_skills),
+        }
+        for fit in fits
+    ]
+    return pd.DataFrame(rows)
 
 
 # ---------------------------------------------------------------------------
